@@ -1,6 +1,6 @@
 # RWRVEE
 
-Configurable & fast deterministic online recommendation system for in-memory tabular data that can be represented as a bipartite graph. We use simulatity of embedded vectors to combind both the structural similarities of the network as well as the similarities between edge vectors.
+Configurable & fast deterministic online recommendation system for in-memory tabular data that can be represented as a virtual bipartite graph. We use simulatity of embedded vectors to combind both the structural similarities of the network as well as the similarities between edge vectors.
 
 This recommender algorithm is designed to work on SQL-like table outputs (for example a "Review" table) where foreign keys represent links between a target node type (users) and the items to make recommendations on. It can support any number of additional node types as long as the graph is bipartite and the only edges that exist are between the target node type and the additional node types.
 
