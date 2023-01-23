@@ -6,4 +6,6 @@ This recommender algorithm is designed to work on SQL-like table outputs (for ex
 
 If we consider an in-context example, this algorithm was designed for MiddCourses, a course review site. We define our graph from the "Review" table and have 3 distinct node types (users, courses, instructors). The graph is structured from the foreign keys on each review row such that we have edges between users and courses and also between users and instructors. Along those edges, we embed values from the review as our vectors. Users are our target node type and we make course recommendations.
 
+This algorithm is desinged for small to medium sized data sets (or subsets of big data) that can fit in memory.
+
 Recsys network algorithm designed to return a configurable node neighborhood for nodes of a given type on a bipartite graph.
