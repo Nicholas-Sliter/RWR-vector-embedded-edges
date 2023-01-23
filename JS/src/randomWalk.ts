@@ -1,5 +1,5 @@
 import seedrandom from 'seedrandom';
-import { randomUniformItem, randomWeightedItem } from './randomUtils';
+import { randomUniformItem, randomWeightedItem } from './randomUtils.js';
 
 type INodeId = string;
 type INodeType = string;
@@ -31,8 +31,15 @@ interface INodesConfig extends Record<string, {
     type: INodeType;
     idColumn: IColumnName;
     ratingColumn?: IColumnName;
+    // vector: IVectorConfig; // Vectors need to be on edge configs not node configs!!!
+    // connectsTo: INodeType[];
+}> { }
+
+
+interface IEdgeConfig extends Record<string, {
+    source: INodeType;
+    destination: INodeType;
     vector: IVectorConfig;
-    connectsTo: INodeType[];
 }> { }
 
 
@@ -40,11 +47,7 @@ interface INodesConfig extends Record<string, {
 interface IDataConfig {
     columns: string[];
     nodeTypes: INodesConfig;
-    edges: {
-        source: INodeType;
-        target: INodeType;
-        existsIf: (source: INode, target: INode) => boolean;
-    }[];
+    edges: IEdgeConfig;
 }
 
 
@@ -58,13 +61,21 @@ interface IRandomWalkConfig {
 
     standardize?: boolean;
 
-    neighborFilter: (neighbor: INode) => boolean;
+    recommendationType: INodeType;
+
+    neighborFilter: (id: INodeId, count: number) => boolean;
+    itemFilter: (id: INodeId, item: {
+        unweighted_count: number,
+        weighted_count: number,
+        sum: number
+    }) => boolean;
     targetNeighbourhoodThreshold: number;
     // recommendationFilter: (recommendation: IRecommendation) => boolean;
 
     vectorSimilarity: (vector1: number[], vector2: number[]) => number;
-    edgeProbability: (source: INode, target: INode) => number;
-    singularRowValue: (row: IData) => number;
+    activationFunction: (value: number) => number;
+    // edgeProbability: (source: INode, target: INode) => number;
+    // singularRowValue: (row: IData) => number;
 
 
     dataConfig: IDataConfig;
@@ -77,12 +88,62 @@ interface ITargetConfig {
     type: INodeType;
 }
 
-interface IRandomWalk {
+export interface IRandomWalk {
     config: IRandomWalkConfig;
     target: ITargetConfig;
     data: IRandomWalkData;
     mappings: Record<string, IRandomWalkMapping>;
 }
+
+
+
+// Consider pruning the maps where degree of array is 1 (dead ends)
+
+
+
+export function computeMappings(data: IRandomWalkData, dataConfig: IDataConfig): Record<string, IRandomWalkMapping> {
+    const mappings: Record<string, IRandomWalkMapping> = {};
+
+    for (const nodeType in dataConfig.nodeTypes) {
+        const mapping = new Map<string, IDataIndex[]>();
+        const idColumn = dataConfig.nodeTypes[nodeType].idColumn;
+        data.forEach((row, rowIndex) => {
+            const id = row[idColumn] as INodeId;
+            const rowIndices = mapping.get(id) || [];
+            rowIndices.push(rowIndex);
+            mapping.set(id, rowIndices);
+        });
+        mappings[nodeType] = mapping;
+    }
+
+    return mappings;
+}
+
+
+
+
+
+// export function standardizeData(data: IRandomWalkData, dataConfig: IDataConfig): IRandomWalkData {
+
+//     const vectorFields = Object.values(dataConfig.edges).reduce((fields, edge) => {
+//         return fields.concat(edge.vector.fields);
+//     }, [] as IColumnName[]);
+
+//     const vectorFieldIndices = vectorFields.map((field) => dataConfig.columns.indexOf(field));
+
+//     const standardizedData = data.map((row) => {
+//         const newRow = { ...row };
+//         vectorFieldIndices.forEach((fieldIndex) => {
+//             newRow[dataConfig.columns[fieldIndex]] = (newRow[dataConfig.columns[fieldIndex]] as number) / 100;
+//         });
+//         return newRow;
+//     });
+
+//     return standardizedData;
+
+
+
+// }
 
 
 
@@ -109,7 +170,6 @@ interface IDataIndexProbability {
 function getNeighborProbabilities(
     node: INode,
     neighborRowIndices: IDataIndex[],
-    mapping: IRandomWalkMapping,
     data: IRandomWalkData,
     config: IRandomWalkConfig): IDataIndexProbability[] {
 
@@ -128,7 +188,7 @@ function getNeighborProbabilities(
     }
 
 
-    const vectorKeys = Object.keys(config.dataConfig.nodeTypes[node.type].vector.fields);
+    const vectorKeys = config.dataConfig.edges[node.type].vector.fields as IColumnName[];
 
     const neighborVectors: number[][] = neighborRowIndices.map((rowIndex) => {
         const row = data[rowIndex];
@@ -143,7 +203,10 @@ function getNeighborProbabilities(
         return { value: config.vectorSimilarity(targetVector, neighborVector), index };
     });
 
-    const filteredSimilarity = vectorSimilarity.filter((similarity) => (similarity.value > 0));
+
+    const filteredSimilarity = vectorSimilarity
+        .filter((similarity) => (similarity.value > 0))
+        .map((similarity => ({ value: config.activationFunction(similarity.value), index: similarity.index })));
 
     const softmaxSimilarity = softmax(filteredSimilarity.map((similarity) => similarity.value));
 
@@ -158,7 +221,7 @@ function getNeighborProbabilities(
 
 
 
-function rwrvee<IData>({ config, target, data, mappings = {} }: IRandomWalk) {
+export function rwrvee({ config, target, data, mappings = {} }: IRandomWalk) {
 
     const rng = seedrandom(config.seed);
 
@@ -168,13 +231,20 @@ function rwrvee<IData>({ config, target, data, mappings = {} }: IRandomWalk) {
         entranceIndex: undefined
     }
 
+    console.log('targetNode', targetNode);
+
     const visitedNeighboursCount = new Map<INodeId, number>();
     let current: INode = Object.assign({}, targetNode);
 
     /* Find the target's type neighborhood */
     let iteration = 0;
-    while (iteration < config.maxIterations) {
+    while (iteration <= config.maxIterations) {
         iteration++;
+
+        // if (iteration % 100 === 0) {
+        // console.log(`Iteration ${iteration}`)
+        // console.log(`Current node: ${current.id} (${current.type})`)
+        // }
 
 
         if (current.id !== target.id) {
@@ -204,15 +274,20 @@ function rwrvee<IData>({ config, target, data, mappings = {} }: IRandomWalk) {
                     }
                     /* Force restart */
                     current = Object.assign({}, targetNode);
+                    continue;
                 }
 
                 const neighborIndex = randomUniformItem(neighbors, rng.quick);
                 const neighbor = data[neighborIndex];
 
+                if (!neighbor) {
+                    /* Force restart */
+                    current = Object.assign({}, targetNode);
+                    continue;
+                }
+
                 const nodeTypes: INodeType[] = [];
                 for (const item of Object.values(config.dataConfig.nodeTypes)) {
-                    //check if idColumn is in neighbor
-
                     if (neighbor.hasOwnProperty(item.idColumn) && neighbor[item.idColumn] !== null) {
                         nodeTypes.push(item.type);
                     }
@@ -235,26 +310,27 @@ function rwrvee<IData>({ config, target, data, mappings = {} }: IRandomWalk) {
 
                 /* Select a random neighbor */
                 const neighbors = getNeighborRowIndices(current, mappings[current.type]);
-                const neighborProbabilites = getNeighborProbabilities(current, neighbors, mappings[current.type], data, config);
+                const neighborProbabilites = getNeighborProbabilities(current, neighbors, data, config);
 
                 if (neighborProbabilites.length === 0) {
                     /* Force restart */
+                    console.log("No neighbors found. Forcing restart");
                     current = Object.assign({}, targetNode);
                     continue;
                 }
 
-                const neighborIndexIndex = randomWeightedItem(
+                const neighborIndex = randomWeightedItem(
                     neighborProbabilites.map((neighbor) => neighbor.index),
                     neighborProbabilites.map((neighbor) => neighbor.probability),
                     rng.quick
                 );
 
-                const neighborIndex = neighbors[neighborIndexIndex];
                 const neighbor = data[neighborIndex];
 
                 if (!neighbor) {
                     // throw new Error(`Neighbor ${neighborIndex} not found`);
                     /* Force restart */
+                    console.log(`Neighbor ${neighborIndex} not found. Forcing restart`);
                     current = Object.assign({}, targetNode);
                     continue;
                 }
@@ -271,7 +347,6 @@ function rwrvee<IData>({ config, target, data, mappings = {} }: IRandomWalk) {
         }
     }
 
-
     const recommendations = new Map<INodeId, {
         unweighted_count: number,
         weighted_count: number,
@@ -281,15 +356,18 @@ function rwrvee<IData>({ config, target, data, mappings = {} }: IRandomWalk) {
     const targetNeighborhood = Array
         .from(visitedNeighboursCount.entries())
         .filter(([_, count]) => count > config.targetNeighbourhoodThreshold)
+        .filter((neighbor) => config.neighborFilter(neighbor[0], neighbor[1]))
         .sort((a, b) => b[1] - a[1])
         .slice(0, config.maxTargetNeighbours);
+
+    console.log('targetNeighborhood', targetNeighborhood);
 
     targetNeighborhood.forEach(([entry, count]) => {
 
         const targetItems = (mappings[target.type]
             .get(entry) || [])
             .map((item) =>
-                data[item][config.dataConfig.nodeTypes[target.type].idColumn] as INodeId);
+                data[item][config.dataConfig.nodeTypes[config.recommendationType].idColumn] as INodeId);
 
         targetItems.forEach((id, index) => {
             const { unweighted_count, weighted_count, sum } = recommendations.get(id) || {
@@ -301,7 +379,7 @@ function rwrvee<IData>({ config, target, data, mappings = {} }: IRandomWalk) {
             // const targetRatingValue = data[target.entranceIndex as number][config.dataConfig.nodeTypes[target.type].ratingColumn] as number;
             // const targetRatingValue = config.singularRowValue(data
             const targetIndices = (mappings[target.type].get(entry) || []) as IDataIndex[];
-            const targetRatingValue = data[targetIndices[index]][config.dataConfig.nodeTypes[target.type].ratingColumn as string] as number;
+            const targetRatingValue = data[targetIndices[index]][config.dataConfig.nodeTypes[config.recommendationType].ratingColumn as string] as number;
 
 
             recommendations.set(id, {
@@ -314,14 +392,14 @@ function rwrvee<IData>({ config, target, data, mappings = {} }: IRandomWalk) {
 
     const targetIndices = (mappings[target.type].get(target.id) || []) as IDataIndex[];
     const targetItemAlreadyRated = new Set<INodeId>(targetIndices
-        .map((entry) => entry[config.dataConfig.nodeTypes[target.type].idColumn] as INodeId));
+        .map((index) => data[index][config.dataConfig.nodeTypes[config.recommendationType].idColumn] as INodeId));
 
-
-    // const recommendationList = Array
+    console.log("recommendations:", recommendations);
 
     const sortedRecommendations: INodeId[] = Array
         .from(recommendations.entries())
         .filter(([id, _]) => !targetItemAlreadyRated.has(id))
+        .filter(([id, obj]) => config.itemFilter(id, obj))
         // some other filter logic
         .map(([id, {
             unweighted_count,
@@ -334,6 +412,8 @@ function rwrvee<IData>({ config, target, data, mappings = {} }: IRandomWalk) {
         .sort((a, b) => b.avg - a.avg)
         .slice(0, config.maxRecommendations)
         .map((item) => item.id);
+
+    console.log('sortedRecommendations', sortedRecommendations);
 
     return sortedRecommendations;
 
